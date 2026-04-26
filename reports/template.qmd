@@ -1,0 +1,464 @@
+---
+title: "Google Trends vs Stock Price Analysis"
+format:
+  html:
+    page-layout: full
+    toc: true
+    toc-depth: 3
+    embed-resources: true
+    theme: cosmo
+    code-fold: true
+params:
+  analysis_name: "ozempic_nvo"
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{python}
+#| tags: [parameters]
+# Default value — overridden by -P analysis_name:<name> at render time via papermill.
+# Do NOT use params["analysis_name"] here; papermill injects variables directly.
+analysis_name = "ozempic_nvo"
+```
+
+```{python}
+import json
+from pathlib import Path
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+
+# ── Paths ──────────────────────────────────────────────────────────────────
+_REPO_ROOT = Path.cwd()
+# If rendering from reports/, step up one level
+if not (_REPO_ROOT / "data").exists():
+    _REPO_ROOT = _REPO_ROOT.parent
+
+out_dir   = _REPO_ROOT / "data" / "outputs" / analysis_name
+meta_path = out_dir / "meta.json"
+res_path  = out_dir / "analysis_results.json"
+csv_path  = out_dir / "aligned.csv"
+
+# ── Load artifacts ─────────────────────────────────────────────────────────
+with meta_path.open() as f:
+    meta = json.load(f)
+
+with res_path.open() as f:
+    results = json.load(f)
+
+df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+trend_cols = [c for c in df.columns if c.startswith("trend_")]
+term_names = [c[len("trend_"):] for c in trend_cols]
+
+PLOTLY_COLORS = px.colors.qualitative.Plotly
+
+
+def add_event_vlines(fig, events, yref="paper", color="rgba(130,130,130,0.55)"):
+    """
+    Add vertical event lines to a Plotly figure using add_shape + add_annotation.
+    Works on all figure types including secondary-y subplots.
+    Plotly 5/6: add_vline with date-string x on secondary-y subplots is broken;
+    this helper avoids that issue entirely.
+    """
+    for ev in events:
+        x_val = ev["nearest_weekly_date"]
+        fig.add_shape(
+            type="line",
+            xref="x", yref=yref,
+            x0=x_val, x1=x_val,
+            y0=0, y1=1,
+            line=dict(color=color, dash="dash", width=1.2),
+        )
+        fig.add_annotation(
+            x=x_val, xref="x",
+            y=1.0, yref=yref,
+            text=ev["label"],
+            showarrow=False,
+            xanchor="left",
+            yanchor="top",
+            font=dict(size=8, color="grey"),
+            textangle=-90,
+            bgcolor="rgba(255,255,255,0.7)",
+        )
+```
+
+# `{python} meta["ticker"]` · `{python} meta["name"]`
+
+---
+
+## 1 Overview
+
+| Field | Value |
+|---|---|
+| Analysis name | `{python} meta["name"]` |
+| Ticker | `{python} meta["ticker"]` |
+| Search terms | `{python} ", ".join(meta["search_terms"])` |
+| Geography | `{python} meta["geo"]` |
+| Date range | `{python} meta["date_from"]` → `{python} meta["date_to"]` |
+| Weekly observations | `{python} meta["n_weeks"]` |
+| Data sources | Google Trends (pytrends), Yahoo Finance (yfinance) |
+
+> **Note on Google Trends values:** The interest series is normalised 0–100
+> *within the query window*.  Values represent relative search interest, not
+> absolute search volumes.  All terms in a single request share the same
+> baseline, so they are directly comparable to each other.
+
+---
+
+## 2 Raw Time Series
+
+```{python}
+fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+# Trend lines
+for i, (col, term) in enumerate(zip(trend_cols, term_names)):
+    fig.add_trace(
+        go.Scatter(
+            x=df.index, y=df[col],
+            name=f"Search: {term}",
+            line=dict(color=PLOTLY_COLORS[i], width=1.5),
+            opacity=0.85,
+        ),
+        secondary_y=False,
+    )
+
+# Normalised price
+fig.add_trace(
+    go.Scatter(
+        x=df.index, y=df["price_norm"],
+        name=f"{meta['ticker']} price (normalised 0–100)",
+        line=dict(color="black", width=2.5, dash="dot"),
+        opacity=0.9,
+    ),
+    secondary_y=True,
+)
+
+# Event markers
+add_event_vlines(fig, results["event_overlay"]["result"]["events"])
+
+fig.update_xaxes(title_text="Week")
+fig.update_yaxes(title_text="Google Trends interest (0–100)", secondary_y=False)
+fig.update_yaxes(title_text=f"{meta['ticker']} normalised price (0–100)", secondary_y=True)
+fig.update_layout(
+    title=f"Google Search Interest vs {meta['ticker']} Stock Price",
+    height=500,
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    hovermode="x unified",
+)
+fig.show()
+```
+
+---
+
+## 3 Correlation at Zero Lag
+
+```{python}
+corr_data = results["zero_lag_correlation"]
+rows = []
+for r in corr_data:
+    res = r["result"]
+    rows.append({
+        "Search term": r["term"],
+        "Pearson r (price)": res["pearson_r"],
+        "Pearson p (price)": res["pearson_p"],
+        "Spearman r (price)": res["spearman_r"],
+        "Spearman p (price)": res["spearman_p"],
+        "Pearson r (returns)": res.get("pearson_r_returns"),
+        "Pearson p (returns)": res.get("pearson_p_returns"),
+        "n": res["n"],
+    })
+corr_df = pd.DataFrame(rows)
+
+# Render as a styled table
+def _sig(p):
+    if p is None: return ""
+    if p < 0.001: return "***"
+    if p < 0.01:  return "**"
+    if p < 0.05:  return "*"
+    return ""
+
+corr_df["Sig (price)"] = corr_df["Pearson p (price)"].apply(_sig)
+corr_df["Sig (returns)"] = corr_df["Pearson p (returns)"].apply(_sig)
+from IPython.display import display, Markdown
+display(corr_df.to_html(index=False, float_format="{:.4f}".format))
+```
+
+*Significance: \*\*\* p<0.001, \*\* p<0.01, \* p<0.05*
+
+**Interpretations:**
+
+```{python}
+for r in corr_data:
+    print(f"- {r['interpretation']}")
+```
+
+---
+
+## 4 Cross-Correlation Function (Lead/Lag)
+
+```{python}
+ccf_data = results["cross_correlation"]
+
+fig = go.Figure()
+for i, r in enumerate(ccf_data):
+    res = r["result"]
+    optimal = res["optimal_lag"]
+    colors = [
+        "crimson" if lag == optimal else PLOTLY_COLORS[i]
+        for lag in res["lags"]
+    ]
+    fig.add_trace(
+        go.Bar(
+            x=res["lags"],
+            y=res["ccf_values"],
+            name=r["term"],
+            marker_color=colors,
+            opacity=0.75,
+        )
+    )
+
+fig.add_hline(y=0, line_color="black", line_width=0.8)
+fig.update_layout(
+    title="Cross-Correlation Function (positive lag = searches lead price)",
+    xaxis_title="Lag (weeks)  [positive = trend leads stock]",
+    yaxis_title="Correlation coefficient",
+    barmode="group",
+    height=420,
+    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+)
+fig.show()
+```
+
+**Interpretations:**
+
+```{python}
+for r in ccf_data:
+    print(f"- {r['interpretation']}")
+```
+
+---
+
+## 5 Rolling 52-Week Correlation
+
+```{python}
+roll_data = results["rolling_correlation"]
+
+fig = go.Figure()
+for i, r in enumerate(roll_data):
+    res = r["result"]
+    dates = res["dates"]
+    vals  = [v if v is not None else float("nan") for v in res["rolling_corr"]]
+    fig.add_trace(
+        go.Scatter(
+            x=dates, y=vals,
+            name=r["term"],
+            line=dict(color=PLOTLY_COLORS[i], width=2),
+        )
+    )
+
+# Event markers
+add_event_vlines(fig, results["event_overlay"]["result"]["events"])
+
+fig.add_hline(y=0, line_color="black", line_dash="dot", line_width=0.8)
+fig.update_layout(
+    title=f"Rolling 52-Week Correlation: Search Terms vs {meta['ticker']} Normalised Price",
+    xaxis_title="Week",
+    yaxis_title="Pearson r",
+    yaxis=dict(range=[-1.05, 1.05]),
+    height=430,
+    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    hovermode="x unified",
+)
+fig.show()
+```
+
+**Interpretations:**
+
+```{python}
+for r in roll_data:
+    print(f"- {r['interpretation']}")
+```
+
+---
+
+## 6 Granger Causality
+
+Does search volume help predict future stock **returns**?
+
+```{python}
+gc_data = results["granger_causality"]
+
+fig = go.Figure()
+for i, r in enumerate(gc_data):
+    per_lag = r["result"]["per_lag"]
+    lags   = [d["lag"] for d in per_lag]
+    pvals  = [d["p_value"] for d in per_lag]
+    colors = ["crimson" if p < 0.05 else "steelblue" for p in pvals]
+    fig.add_trace(
+        go.Bar(
+            x=lags,
+            y=pvals,
+            name=r["term"],
+            marker_color=colors,
+            opacity=0.8,
+        )
+    )
+
+fig.add_hline(
+    y=0.05,
+    line=dict(color="red", dash="dash", width=1.5),
+    annotation_text="p = 0.05",
+    annotation_position="right",
+)
+fig.update_layout(
+    title="Granger Causality p-values per Lag Order (red bars = significant)",
+    xaxis_title="Lag order (weeks)",
+    yaxis_title="p-value (F-test)",
+    barmode="group",
+    height=420,
+    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+)
+fig.show()
+```
+
+**Interpretations:**
+
+```{python}
+for r in gc_data:
+    print(f"- {r['interpretation']}")
+```
+
+---
+
+## 7 Cointegration Test
+
+Is there a long-run equilibrium between search trends and stock price?
+
+```{python}
+coint_data = results["cointegration"]
+rows = []
+for r in coint_data:
+    res = r["result"]
+    rows.append({
+        "Search term": r["term"],
+        "Cointegrated?": "Yes ✓" if res["cointegrated"] else "No",
+        "Test statistic": res["coint_t"],
+        "p-value": res["p_value"],
+        "Crit (1%)": res["crit_1pct"],
+        "Crit (5%)": res["crit_5pct"],
+        "Crit (10%)": res["crit_10pct"],
+    })
+display(pd.DataFrame(rows).to_html(index=False, float_format="{:.4f}".format))
+```
+
+**Interpretations:**
+
+```{python}
+for r in coint_data:
+    print(f"- {r['interpretation']}")
+```
+
+---
+
+## 8 Key Event Overlay
+
+```{python}
+ev_data = results["event_overlay"]["result"]
+
+fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+# Raw price
+fig.add_trace(
+    go.Scatter(
+        x=df.index, y=df["price_raw"],
+        name=f"{meta['ticker']} price (raw)",
+        line=dict(color="black", width=2),
+        fill="tozeroy",
+        fillcolor="rgba(0,0,0,0.05)",
+    ),
+    secondary_y=False,
+)
+
+# Top trend series overlay
+if trend_cols:
+    top_col = trend_cols[0]
+    fig.add_trace(
+        go.Scatter(
+            x=df.index, y=df[top_col],
+            name=f"Search: {term_names[0]}",
+            line=dict(color=PLOTLY_COLORS[0], width=1.5, dash="dot"),
+            opacity=0.7,
+        ),
+        secondary_y=True,
+    )
+
+# Event annotations — use helper to avoid add_vline Plotly 6 date/subplot bug
+add_event_vlines(fig, ev_data["events"], color="rgba(220,50,50,0.6)")
+
+fig.update_xaxes(title_text="Week")
+fig.update_yaxes(title_text=f"{meta['ticker']} price (raw)", secondary_y=False)
+fig.update_yaxes(title_text="Google Trends interest (0–100)", secondary_y=True)
+fig.update_layout(
+    title=f"{meta['ticker']} Price with Key Events",
+    height=520,
+    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    hovermode="x unified",
+)
+fig.show()
+```
+
+```{python}
+print(results["event_overlay"]["interpretation"])
+```
+
+---
+
+## Summary
+
+```{python}
+lines = []
+
+# Zero-lag correlation summary
+best_corr = max(results["zero_lag_correlation"], key=lambda r: abs(r["result"]["pearson_r"]))
+lines.append(
+    f"**Strongest zero-lag correlation:** '{best_corr['term']}' "
+    f"(Pearson r = {best_corr['result']['pearson_r']:.3f}, "
+    f"p = {best_corr['result']['pearson_p']:.4f})."
+)
+
+# CCF summary
+best_ccf = max(results["cross_correlation"], key=lambda r: abs(r["result"]["optimal_corr"]))
+lag = best_ccf["result"]["optimal_lag"]
+lag_str = f"searches lead by {lag} week(s)" if lag > 0 else (
+    f"price leads by {abs(lag)} week(s)" if lag < 0 else "no lead/lag"
+)
+lines.append(
+    f"**Optimal lead/lag:** '{best_ccf['term']}' peaks at lag {lag} ({lag_str}), "
+    f"r = {best_ccf['result']['optimal_corr']:.3f}."
+)
+
+# Granger summary
+gc_sig = [r for r in results["granger_causality"] if any(d["significant"] for d in r["result"]["per_lag"])]
+if gc_sig:
+    terms_str = ", ".join(f"'{r['term']}'" for r in gc_sig)
+    lines.append(f"**Granger causality:** {terms_str} significantly Granger-cause returns at ≥1 lag order.")
+else:
+    lines.append("**Granger causality:** No search term significantly Granger-causes returns at the 5% level.")
+
+# Cointegration summary
+coint_yes = [r for r in results["cointegration"] if r["result"]["cointegrated"]]
+if coint_yes:
+    terms_str = ", ".join(f"'{r['term']}'" for r in coint_yes)
+    lines.append(f"**Cointegration:** {terms_str} appear cointegrated with the stock price.")
+else:
+    lines.append("**Cointegration:** No evidence of long-run cointegration between search terms and price.")
+
+for line in lines:
+    print(line)
+    print()
+```

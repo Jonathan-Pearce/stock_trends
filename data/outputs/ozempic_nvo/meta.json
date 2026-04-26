@@ -1,0 +1,18 @@
+{
+  "name": "ozempic_nvo",
+  "search_terms": [
+    "Ozempic",
+    "semaglutide",
+    "Novo Nordisk",
+    "weight loss drug"
+  ],
+  "ticker": "NVO",
+  "date_range": [
+    "2018-01-01",
+    "2026-04-26"
+  ],
+  "geo": "Global",
+  "n_weeks": 434,
+  "date_from": "2018-01-07",
+  "date_to": "2026-04-26"
+}

@@ -1,0 +1,71 @@
+# analyses.yaml
+# -------------
+# Single source of truth for all Google Trends vs stock analyses.
+#
+# Schema per entry:
+#   name         : str   — unique identifier (used for output folder and report filename)
+#   search_terms : list  — up to 5 Google search terms (share the same 0-100 baseline)
+#   ticker       : str   — Yahoo Finance ticker symbol
+#   date_range   : list  — [start_date, end_date] as YYYY-MM-DD strings
+#   geo          : str   — ISO 3166-1 alpha-2 country code, or "" for worldwide (default)
+#   events       : list  — optional list of {date, label} dicts to annotate on charts
+#
+# Run a single analysis:   python run_analysis.py --name ozempic_nvo
+# Run all analyses:        python run_analysis.py --all
+# List available analyses: python run_analysis.py --list
+
+analyses:
+
+  # -----------------------------------------------------------------------
+  # Ozempic / Novo Nordisk (NVO)
+  # The flagship example: tracks the cultural rise of semaglutide and its
+  # impact on Novo Nordisk's stock price.
+  # -----------------------------------------------------------------------
+  - name: ozempic_nvo
+    search_terms:
+      - "Ozempic"
+      - "semaglutide"
+      - "Novo Nordisk"
+      - "weight loss drug"
+    ticker: NVO
+    date_range:
+      - "2018-01-01"
+      - "2026-04-26"
+    geo: ""  # worldwide
+    events:
+      - date: "2017-12-05"
+        label: "FDA approves Ozempic (T2D)"
+      - date: "2021-06-04"
+        label: "FDA approves Wegovy (obesity)"
+      - date: "2023-03-01"
+        label: "Celebrity/social media wave"
+      - date: "2023-06-15"
+        label: "NVO near all-time high"
+      - date: "2024-03-05"
+        label: "Ozempic shortage headlines"
+
+  # -----------------------------------------------------------------------
+  # ChatGPT / NVIDIA (NVDA)
+  # Tests whether the AI search frenzy following the ChatGPT launch in
+  # November 2022 correlates with NVIDIA's massive price appreciation.
+  # -----------------------------------------------------------------------
+  - name: chatgpt_nvda
+    search_terms:
+      - "ChatGPT"
+      - "artificial intelligence"
+      - "NVIDIA GPU"
+      - "large language model"
+    ticker: NVDA
+    date_range:
+      - "2022-01-01"
+      - "2026-04-26"
+    geo: ""  # worldwide
+    events:
+      - date: "2022-11-30"
+        label: "ChatGPT public launch"
+      - date: "2023-01-23"
+        label: "Microsoft $10B OpenAI investment"
+      - date: "2023-05-24"
+        label: "NVDA Q1 FY2024 earnings beat"
+      - date: "2024-06-10"
+        label: "NVDA all-time high"
