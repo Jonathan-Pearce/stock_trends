@@ -1,13 +1,14 @@
 ---
-title: "Google Trends vs Stock Price Analysis"
+title: "Google Trends vs Stock Price"
 format:
   html:
-    page-layout: full
     toc: true
     toc-depth: 3
     embed-resources: true
-    theme: cosmo
-    code-fold: true
+    self-contained: true
+    theme: flatly
+    fig-width: 10
+    fig-height: 4.5
 params:
   analysis_name: "ozempic_nvo"
 execute:
@@ -15,6 +16,378 @@ execute:
   warning: false
   message: false
 ---
+
+```{python}
+#| tags: [parameters]
+analysis_name = "ozempic_nvo"
+```
+
+```{python}
+import json, warnings
+from pathlib import Path
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import matplotlib.dates as mdates
+
+warnings.filterwarnings("ignore")
+
+# ── Style ─────────────────────────────────────────────────────────────────
+plt.rcParams.update({
+    "figure.dpi": 130,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.grid": True,
+    "grid.alpha": 0.3,
+    "grid.linestyle": "--",
+    "font.size": 11,
+    "axes.titlesize": 13,
+    "axes.titleweight": "bold",
+    "legend.frameon": False,
+})
+
+COLORS = ["#2196F3", "#FF5722", "#4CAF50", "#9C27B0", "#FF9800"]
+PRICE_COLOR = "#212121"
+EVENT_COLOR = "#E53935"
+
+# ── Paths ──────────────────────────────────────────────────────────────────
+_REPO_ROOT = Path.cwd()
+if not (_REPO_ROOT / "data").exists():
+    _REPO_ROOT = _REPO_ROOT.parent
+
+out_dir = _REPO_ROOT / "data" / "outputs" / analysis_name
+
+with (out_dir / "meta.json").open() as f:
+    meta = json.load(f)
+with (out_dir / "analysis_results.json").open() as f:
+    results = json.load(f)
+
+df = pd.read_csv(out_dir / "aligned.csv", index_col=0, parse_dates=True)
+
+trend_cols = [c for c in df.columns if c.startswith("trend_")]
+term_names = [c[len("trend_"):] for c in trend_cols]
+events     = results["event_overlay"]["result"]["events"]
+```
+
+# `{python} meta["ticker"]` — `{python} meta["name"].replace("_", " ").title()`
+
+---
+
+## Overview
+
+| | |
+|---|---|
+| **Ticker** | `{python} meta["ticker"]` |
+| **Search terms** | `{python} ", ".join(meta["search_terms"])` |
+| **Geography** | `{python} meta["geo"]` |
+| **Period** | `{python} meta["date_from"]` → `{python} meta["date_to"]` |
+| **Weekly observations** | `{python} meta["n_weeks"]` |
+| **Data sources** | Google Trends (pytrends) · Yahoo Finance (yfinance) |
+
+> Google Trends values are **relative** interest (0–100, normalised within the query window), not absolute search volumes.
+
+---
+
+## 1 · Time Series
+
+```{python}
+fig, ax1 = plt.subplots(figsize=(11, 4.5))
+ax2 = ax1.twinx()
+
+for i, (col, term) in enumerate(zip(trend_cols, term_names)):
+    ax1.plot(df.index, df[col], color=COLORS[i], linewidth=1.4,
+             label=f"Search: {term}", alpha=0.85)
+
+ax2.plot(df.index, df["price_raw"], color=PRICE_COLOR, linewidth=2,
+         linestyle="--", label=f"{meta['ticker']} price", alpha=0.9)
+
+for ev in events:
+    ax1.axvline(pd.Timestamp(ev["nearest_weekly_date"]),
+                color=EVENT_COLOR, linewidth=0.8, alpha=0.5, linestyle=":")
+    ax1.text(pd.Timestamp(ev["nearest_weekly_date"]), ax1.get_ylim()[1],
+             f"  {ev['label']}", rotation=90, fontsize=7.5, color=EVENT_COLOR,
+             va="top", alpha=0.8)
+
+ax1.set_ylabel("Google Trends interest (0–100)", color=COLORS[0])
+ax2.set_ylabel(f"{meta['ticker']} price", color=PRICE_COLOR)
+ax1.set_xlabel("")
+ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+
+lines1, labels1 = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=9)
+ax1.set_title("Search Interest vs Stock Price")
+fig.tight_layout()
+plt.show()
+```
+
+---
+
+## 2 · Correlation at Zero Lag
+
+```{python}
+corr_data = results["zero_lag_correlation"]
+
+rows = []
+for r in corr_data:
+    res = r["result"]
+    def sig(p):
+        if p is None: return ""
+        if p < 0.001: return "***"
+        if p < 0.01:  return "**"
+        if p < 0.05:  return "*"
+        return "ns"
+    rows.append({
+        "Term": r["term"],
+        "Pearson r (price)": f"{res['pearson_r']:.3f}",
+        "p": sig(res["pearson_p"]),
+        "Spearman r (price)": f"{res['spearman_r']:.3f}",
+        "Pearson r (returns)": f"{res['pearson_r_returns']:.3f}" if res.get("pearson_r_returns") is not None else "—",
+        "p ": sig(res.get("pearson_p_returns")),
+        "n": res["n"],
+    })
+
+from IPython.display import display, HTML
+display(HTML(pd.DataFrame(rows).to_html(index=False)))
+```
+
+*\*\*\* p<0.001 · \*\* p<0.01 · \* p<0.05 · ns not significant*
+
+```{python}
+for r in corr_data:
+    print(f"- {r['interpretation']}")
+```
+
+---
+
+## 3 · Cross-Correlation Function
+
+Positive lag = searches lead price.
+
+```{python}
+ccf_data = results["cross_correlation"]
+n_terms  = len(ccf_data)
+fig, axes = plt.subplots(1, n_terms, figsize=(5.5 * n_terms, 4), sharey=True)
+if n_terms == 1:
+    axes = [axes]
+
+for ax, r, color in zip(axes, ccf_data, COLORS):
+    res    = r["result"]
+    lags   = res["lags"]
+    vals   = res["ccf_values"]
+    opt    = res["optimal_lag"]
+    bar_colors = [color if lag != opt else EVENT_COLOR for lag in lags]
+    ax.bar(lags, vals, color=bar_colors, alpha=0.8, width=0.7)
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.axvline(opt, color=EVENT_COLOR, linewidth=1, linestyle="--", alpha=0.7)
+    ax.set_title(r["term"], fontsize=11)
+    ax.set_xlabel("Lag (weeks)")
+    ax.set_xlim(-13, 13)
+    ax.set_xticks(range(-12, 13, 3))
+
+axes[0].set_ylabel("Correlation")
+fig.suptitle("Cross-Correlation: Search Terms vs Price  (red bar = peak lag)",
+             fontsize=12, fontweight="bold")
+fig.tight_layout()
+plt.show()
+```
+
+```{python}
+for r in ccf_data:
+    print(f"- {r['interpretation']}")
+```
+
+---
+
+## 4 · Rolling 52-Week Correlation
+
+```{python}
+roll_data = results["rolling_correlation"]
+fig, ax   = plt.subplots(figsize=(11, 4))
+
+for i, r in enumerate(roll_data):
+    res   = r["result"]
+    dates = pd.to_datetime(res["dates"])
+    vals  = pd.array(res["rolling_corr"], dtype="Float64")
+    ax.plot(dates, vals, color=COLORS[i], linewidth=1.6,
+            label=r["term"], alpha=0.85)
+
+for ev in events:
+    ax.axvline(pd.Timestamp(ev["nearest_weekly_date"]),
+               color=EVENT_COLOR, linewidth=0.8, alpha=0.45, linestyle=":")
+
+ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
+ax.set_ylim(-1.05, 1.05)
+ax.set_ylabel("Pearson r")
+ax.set_xlabel("")
+ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+ax.legend(fontsize=9)
+ax.set_title(f"Rolling 52-Week Correlation vs {meta['ticker']} Normalised Price")
+fig.tight_layout()
+plt.show()
+```
+
+```{python}
+for r in roll_data:
+    print(f"- {r['interpretation']}")
+```
+
+---
+
+## 5 · Granger Causality
+
+Does search volume help predict future **returns**?
+
+```{python}
+gc_data = results["granger_causality"]
+if not gc_data:
+    print("⚠️  Granger causality skipped — not enough observations (need at least 3 × max_lag weekly data points).")
+else:
+    n_terms = len(gc_data)
+    fig, axes = plt.subplots(1, n_terms, figsize=(5.5 * n_terms, 4), sharey=True)
+    if n_terms == 1:
+        axes = [axes]
+
+    for ax, r, color in zip(axes, gc_data, COLORS):
+        per_lag  = r["result"]["per_lag"]
+        lags     = [d["lag"] for d in per_lag]
+        pvals    = [d["p_value"] for d in per_lag]
+        bar_cols = [EVENT_COLOR if p < 0.05 else color for p in pvals]
+        ax.bar(lags, pvals, color=bar_cols, alpha=0.8, width=0.65)
+        ax.axhline(0.05, color=EVENT_COLOR, linewidth=1.2,
+                   linestyle="--", label="p = 0.05")
+        ax.set_title(r["term"], fontsize=11)
+        ax.set_xlabel("Lag order (weeks)")
+        ax.set_xticks(lags)
+
+    axes[0].set_ylabel("p-value (F-test)")
+    fig.suptitle("Granger Causality p-values  (red bars = significant at 5%)",
+                 fontsize=12, fontweight="bold")
+    fig.tight_layout()
+    plt.show()
+    for r in gc_data:
+        print(f"- {r['interpretation']}")
+```
+
+---
+
+## 6 · Cointegration
+
+```{python}
+coint_data = results["cointegration"]
+if not coint_data:
+    print("⚠️  Cointegration test skipped — not enough observations (need at least 30 weekly data points).")
+else:
+    rows = []
+    for r in coint_data:
+        res = r["result"]
+        rows.append({
+            "Term": r["term"],
+            "Cointegrated?": "Yes ✓" if res["cointegrated"] else "No",
+            "Test stat": f"{res['coint_t']:.3f}",
+            "p-value": f"{res['p_value']:.4f}",
+            "Crit 1%": f"{res['crit_1pct']:.3f}",
+            "Crit 5%": f"{res['crit_5pct']:.3f}",
+            "Crit 10%": f"{res['crit_10pct']:.3f}",
+        })
+    display(HTML(pd.DataFrame(rows).to_html(index=False)))
+    for r in coint_data:
+        print(f"- {r['interpretation']}")
+```
+
+---
+
+## 7 · Key Event Overlay
+
+```{python}
+fig, ax1 = plt.subplots(figsize=(11, 5))
+ax2 = ax1.twinx()
+
+ax1.fill_between(df.index, df["price_raw"], alpha=0.12, color=PRICE_COLOR)
+ax1.plot(df.index, df["price_raw"], color=PRICE_COLOR, linewidth=2,
+         label=f"{meta['ticker']} price")
+
+if trend_cols:
+    ax2.plot(df.index, df[trend_cols[0]], color=COLORS[0], linewidth=1.4,
+             linestyle="--", alpha=0.7, label=f"Search: {term_names[0]}")
+
+for ev in events:
+    ts = pd.Timestamp(ev["nearest_weekly_date"])
+    ax1.axvline(ts, color=EVENT_COLOR, linewidth=1.2, alpha=0.65, linestyle="--")
+    ax1.annotate(
+        ev["label"],
+        xy=(ts, ev["price_level"]),
+        xytext=(10, 15), textcoords="offset points",
+        fontsize=8, color=EVENT_COLOR,
+        arrowprops=dict(arrowstyle="->", color=EVENT_COLOR, lw=0.8),
+        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=EVENT_COLOR, alpha=0.85),
+    )
+
+ax1.set_ylabel(f"{meta['ticker']} price", color=PRICE_COLOR)
+ax2.set_ylabel(f"Search: {term_names[0]} (0–100)", color=COLORS[0])
+ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+
+lines1, labels1 = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=9)
+ax1.set_title(f"{meta['ticker']} Price with Key Events")
+fig.tight_layout()
+plt.show()
+```
+
+---
+
+## Summary
+
+```{python}
+lines = []
+
+best_corr = max(results["zero_lag_correlation"],
+                key=lambda r: abs(r["result"]["pearson_r"]))
+lines.append(
+    f"**Strongest zero-lag correlation:** '{best_corr['term']}' "
+    f"(Pearson r = {best_corr['result']['pearson_r']:.3f}, "
+    f"p = {best_corr['result']['pearson_p']:.2e})."
+)
+
+best_ccf = max(results["cross_correlation"],
+               key=lambda r: abs(r["result"]["optimal_corr"]))
+lag = best_ccf["result"]["optimal_lag"]
+if lag > 0:   lag_str = f"searches lead price by {lag} week(s)"
+elif lag < 0: lag_str = f"price leads searches by {abs(lag)} week(s)"
+else:         lag_str = "no lead/lag"
+lines.append(
+    f"**Optimal lead/lag:** '{best_ccf['term']}' peaks at lag {lag} ({lag_str}), "
+    f"r = {best_ccf['result']['optimal_corr']:.3f}."
+)
+
+gc_sig = [r for r in results["granger_causality"]
+          if any(d["significant"] for d in r["result"]["per_lag"])]
+if not results["granger_causality"]:
+    lines.append("**Granger causality:** Skipped — insufficient observations.")
+elif gc_sig:
+    lines.append(f"**Granger causality:** {', '.join(repr(r['term']) for r in gc_sig)} "
+                 "significantly Granger-cause returns at ≥1 lag order.")
+else:
+    lines.append("**Granger causality:** No term significantly Granger-causes returns at the 5% level.")
+
+coint_yes = [r for r in results["cointegration"] if r["result"]["cointegrated"]]
+if not results["cointegration"]:
+    lines.append("**Cointegration:** Skipped — insufficient observations.")
+elif coint_yes:
+    lines.append(f"**Cointegration:** {', '.join(repr(r['term']) for r in coint_yes)} "
+                 "appear cointegrated with the stock price.")
+else:
+    lines.append("**Cointegration:** No evidence of long-run cointegration.")
+
+for line in lines:
+    print(line)
+    print()
+```
+
 
 ```{python}
 #| tags: [parameters]
